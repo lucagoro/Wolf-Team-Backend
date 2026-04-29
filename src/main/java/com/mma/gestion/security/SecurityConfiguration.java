@@ -2,6 +2,7 @@ package com.mma.gestion.security;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.Customizer;
@@ -33,8 +34,17 @@ public class SecurityConfiguration {
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http.csrf(AbstractHttpConfigurer::disable)
           .cors(Customizer.withDefaults())
-          .authorizeHttpRequests(req -> req.requestMatchers("/auth/**") // Agregar las demás rutas públicas aquí
-            .permitAll()
+          .authorizeHttpRequests(req -> req
+            .requestMatchers("/auth/**").permitAll()
+            .requestMatchers(HttpMethod.GET, "/students/**").hasAnyAuthority("ADMIN", "GUEST")
+            .requestMatchers(HttpMethod.POST, "/students/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.PUT, "/students/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.DELETE, "/students/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.PATCH, "/students/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.GET, "/payments/**").hasAnyAuthority("ADMIN", "GUEST")
+            .requestMatchers(HttpMethod.POST, "/payments/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.PUT, "/payments/**").hasAuthority("ADMIN")
+            .requestMatchers(HttpMethod.DELETE, "/payments/**").hasAuthority("ADMIN")
             .anyRequest()
             .authenticated())
           .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthorizedHandler))
