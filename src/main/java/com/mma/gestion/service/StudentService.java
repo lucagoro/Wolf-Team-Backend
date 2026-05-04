@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
@@ -169,7 +170,6 @@ public class StudentService {
                 .toList();
     }
 
-    // Mas adelante mejorar con una consulta personalizada en el repositorio
     public StudentSummaryDTO getStudentsSummary() {
 
     List<Student> students = studentRepository.findAll();
@@ -225,9 +225,15 @@ public class StudentService {
     return new StudentSummaryDTO(total, alDia, vencidos, sinPagos, totalMes);
 }
 
-    // Método con paginación
+    /**
+     * Devuelve una página de alumnos ordenados y con su estado actual calculado.
+     *
+     * @param pageable Información de paginación (página solicitada y tamaño).
+     * @param status  Filtro opcional por estado. Si no es null, sólo devuelve alumnos
+     *                cuyo estado calculado coincide con este valor.
+     */
     public Page<StudentDTO> getStudentsPaginated(Pageable pageable, StudentStatus status) {
-        // Obtener últimos pagos una sola vez
+        // Obtener la fecha de vencimiento del último pago de cada alumno en una sola consulta.
         List<Object[]> maxDueDates = paymentRepository.findMaxDueDateByStudent();
         Map<Long, LocalDate> lastPaymentDates = maxDueDates.stream()
             .collect(Collectors.toMap(
@@ -237,30 +243,34 @@ public class StudentService {
 
         LocalDate today = LocalDate.now();
 
-        Page<Student> studentsPage = studentRepository.findAll(pageable);
+        // Convertir todos los alumnos a DTOs con su estado real calculado.
+        List<StudentDTO> studentDTOs = studentRepository.findAllByOrderBySurnameAsc().stream()
+            .map(student -> {
+                LocalDate lastDueDate = lastPaymentDates.get(student.getId());
+                StudentStatus studentStatus = calculateStatusFromDate(lastDueDate, today);
+                return new StudentDTO(
+                    student.getId(),
+                    student.getName(),
+                    student.getSurname(),
+                    student.getPhone(),
+                    studentStatus
+                );
+            })
+            // Si se pidió un filtro de status, se aplica aquí.
+            .filter(dto -> status == null || dto.getStatus() == status)
+            .toList();
 
-        Page<StudentDTO> dtoPage = studentsPage.map(student -> {
-            LocalDate lastDueDate = lastPaymentDates.get(student.getId());
-            StudentStatus studentStatus = calculateStatusFromDate(lastDueDate, today);
-            return new StudentDTO(
-                student.getId(),
-                student.getName(),
-                student.getSurname(),
-                student.getPhone(),
-                status != null ? status : studentStatus
-            );
-        });
+        // Calcular los índices de la sublista para la página solicitada.
+        int start = (int) pageable.getOffset();
+        int end = Math.min(start + pageable.getPageSize(), studentDTOs.size());
+        List<StudentDTO> pageContent = studentDTOs.subList(start, end);
 
-        // Filtrar por status si se requiere
-        if (status != null) {
-            List<StudentDTO> filtered = dtoPage.getContent().stream()
-                .filter(dto -> dto.getStatus() == status)
-                .toList();
-            return new org.springframework.data.domain.PageImpl<>(
-                filtered, pageable, studentsPage.getTotalElements());
-        }
-
-        return dtoPage;
+        // Devolver una página con el contenido filtrado y el total real.
+        return new PageImpl<>(
+            pageContent,
+            pageable,
+            studentDTOs.size()
+        );
     }
 
 }
