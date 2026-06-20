@@ -4,8 +4,13 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import com.mma.gestion.StudentStatus;
@@ -40,14 +45,36 @@ public class StudentService {
     }
 
     public List<StudentDTO> getAllStudents() {
-        return studentRepository.findAllByOrderBySurnameAsc().stream()     // stream convierte una colección en un stream (secuencia de elementos). Permite operaciones funcionales
-                .map(student -> new StudentDTO(         // Conversión de entidad a DTO
+        // Optimizado: obtener todos los últimos pagos en una sola consulta
+        List<Object[]> maxDueDates = paymentRepository.findMaxDueDateByStudent();
+        Map<Long, LocalDate> lastPaymentDates = maxDueDates.stream()
+            .collect(Collectors.toMap(
+                row -> (Long) row[0],
+                row -> (LocalDate) row[1]
+            ));
+
+        LocalDate today = LocalDate.now();
+
+        return studentRepository.findAllByOrderBySurnameAsc().stream()
+                .map(student -> {
+                    LocalDate lastDueDate = lastPaymentDates.get(student.getId());
+                    StudentStatus status = calculateStatusFromDate(lastDueDate, today);
+                    return new StudentDTO(
                         student.getId(),
                         student.getName(),
                         student.getSurname(),
                         student.getPhone(),
-                        calculateStatus(student)))
-                .toList();                              // Convierte el stream de vuelta a una lista  
+                        status);
+                })
+                .toList();
+    }
+
+    // Método auxiliar para calcular status sin consulta adicional
+    private StudentStatus calculateStatusFromDate(LocalDate lastDueDate, LocalDate today) {
+        if (lastDueDate == null) {
+            return StudentStatus.SIN_PAGOS;
+        }
+        return lastDueDate.isBefore(today) ? StudentStatus.VENCIDO : StudentStatus.AL_DIA;
     }
 
     public StudentDTO createStudent(StudentDTO dto) {
@@ -117,23 +144,55 @@ public class StudentService {
     }
 
     public List<StudentDTO> getStudentsByStatus(StudentStatus status) {
+        // Optimizado: obtener todos los últimos pagos en una sola consulta
+        List<Object[]> maxDueDates = paymentRepository.findMaxDueDateByStudent();
+        Map<Long, LocalDate> lastPaymentDates = maxDueDates.stream()
+            .collect(Collectors.toMap(
+                row -> (Long) row[0],
+                row -> (LocalDate) row[1]
+            ));
 
-    return studentRepository.findAllByOrderBySurnameAsc().stream()
-            .filter(student -> calculateStatus(student) == status)
-            .map(student -> new StudentDTO(
+        LocalDate today = LocalDate.now();
+
+        return studentRepository.findAllByOrderBySurnameAsc().stream()
+                .filter(student -> {
+                    LocalDate lastDueDate = lastPaymentDates.get(student.getId());
+                    StudentStatus studentStatus = calculateStatusFromDate(lastDueDate, today);
+                    return studentStatus == status;
+                })
+                .map(student -> new StudentDTO(
                     student.getId(),
                     student.getName(),
                     student.getSurname(),
                     student.getPhone(),
                     status
-            ))
-            .toList();
+                ))
+                .toList();
     }
 
-    // Mas adelante mejorar con una consulta personalizada en el repositorio
     public StudentSummaryDTO getStudentsSummary() {
 
     List<Student> students = studentRepository.findAll();
+
+    // Obtener todos los pagos agrupados en una sola consulta
+    List<Object[]> maxDueDates = paymentRepository.findMaxDueDateByStudent();
+    List<Object[]> monthlyPayments = paymentRepository.sumPaymentsByStudentInMonth(
+        LocalDate.now().withDayOfMonth(1),
+        LocalDate.now().withDayOfMonth(1).plusMonths(1)
+    );
+
+    // Crear mapas para acceso rápido O(1)
+    Map<Long, LocalDate> lastPaymentDates = maxDueDates.stream()
+        .collect(Collectors.toMap(
+            row -> (Long) row[0],
+            row -> (LocalDate) row[1]
+        ));
+
+    Map<Long, BigDecimal> monthlyAmounts = monthlyPayments.stream()
+        .collect(Collectors.toMap(
+            row -> (Long) row[0],
+            row -> (BigDecimal) row[1]
+        ));
 
     long total = students.size();
     long alDia = 0;
@@ -143,30 +202,75 @@ public class StudentService {
 
     LocalDate today = LocalDate.now();
 
-    YearMonth currentMonth = YearMonth.now();
-
     for (Student student : students) {
+        LocalDate lastDueDate = lastPaymentDates.get(student.getId());
 
-        Optional<Payment> lastPayment = paymentRepository.findTopByStudentIdOrderByDueDateDesc(student.getId());
-
-        if (lastPayment.isEmpty()) {
+        if (lastDueDate == null) {
             sinPagos++;
             continue;
         }
 
-        if (lastPayment.get().getDueDate().isBefore(today)) {
+        if (lastDueDate.isBefore(today)) {
             vencidos++;
         } else {
             alDia++;
         }
 
-          if (YearMonth.from(lastPayment.get().getPaymentDate()).equals(currentMonth)) {
-            totalMes = totalMes.add(lastPayment.get().getAmount());
+        BigDecimal amount = monthlyAmounts.get(student.getId());
+        if (amount != null) {
+            totalMes = totalMes.add(amount);
         }
-        
     }
 
     return new StudentSummaryDTO(total, alDia, vencidos, sinPagos, totalMes);
 }
+
+    /**
+     * Devuelve una página de alumnos ordenados y con su estado actual calculado.
+     *
+     * @param pageable Información de paginación (página solicitada y tamaño).
+     * @param status  Filtro opcional por estado. Si no es null, sólo devuelve alumnos
+     *                cuyo estado calculado coincide con este valor.
+     */
+    public Page<StudentDTO> getStudentsPaginated(Pageable pageable, StudentStatus status) {
+        // Obtener la fecha de vencimiento del último pago de cada alumno en una sola consulta.
+        List<Object[]> maxDueDates = paymentRepository.findMaxDueDateByStudent();
+        Map<Long, LocalDate> lastPaymentDates = maxDueDates.stream()
+            .collect(Collectors.toMap(
+                row -> (Long) row[0],
+                row -> (LocalDate) row[1]
+            ));
+
+        LocalDate today = LocalDate.now();
+
+        // Convertir todos los alumnos a DTOs con su estado real calculado.
+        List<StudentDTO> studentDTOs = studentRepository.findAllByOrderBySurnameAsc().stream()
+            .map(student -> {
+                LocalDate lastDueDate = lastPaymentDates.get(student.getId());
+                StudentStatus studentStatus = calculateStatusFromDate(lastDueDate, today);
+                return new StudentDTO(
+                    student.getId(),
+                    student.getName(),
+                    student.getSurname(),
+                    student.getPhone(),
+                    studentStatus
+                );
+            })
+            // Si se pidió un filtro de status, se aplica aquí.
+            .filter(dto -> status == null || dto.getStatus() == status)
+            .toList();
+
+        // Calcular los índices de la sublista para la página solicitada.
+        int start = (int) pageable.getOffset();
+        int end = Math.min(start + pageable.getPageSize(), studentDTOs.size());
+        List<StudentDTO> pageContent = studentDTOs.subList(start, end);
+
+        // Devolver una página con el contenido filtrado y el total real.
+        return new PageImpl<>(
+            pageContent,
+            pageable,
+            studentDTOs.size()
+        );
+    }
 
 }
